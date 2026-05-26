@@ -3,7 +3,6 @@ package incremental
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -12,31 +11,34 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 
 	"go_mysql_sync/config"
+	"go_mysql_sync/logger"
 )
 
 // IncrementalSyncManager 增量同步管理器
 type IncrementalSyncManager struct {
 	cfg       *config.Config
+	log       *logger.Logger
 	position  *BinlogPosition
 	writer    *TargetWriter
 	eventChan chan DMLEvent
 	running   bool
 
 	// 过滤配置
-	onlySchemas    map[string]bool
-	excludeTables  map[string]bool
+	onlySchemas   map[string]bool
+	excludeTables map[string]bool
 }
 
 // NewIncrementalSyncManager 创建增量同步管理器
-func NewIncrementalSyncManager(cfg *config.Config) (*IncrementalSyncManager, error) {
-	writer, err := NewTargetWriter(cfg)
+func NewIncrementalSyncManager(cfg *config.Config, log *logger.Logger) (*IncrementalSyncManager, error) {
+	writer, err := NewTargetWriter(cfg, log)
 	if err != nil {
 		return nil, fmt.Errorf("创建目标库写入器失败: %w", err)
 	}
 
 	mgr := &IncrementalSyncManager{
 		cfg:       cfg,
-		position:  NewBinlogPosition(cfg.Sync.PositionFileOrDefault()),
+		log:       log,
+		position:  NewBinlogPosition(cfg.Sync.PositionFileOrDefault(), log),
 		writer:    writer,
 		eventChan: make(chan DMLEvent, 10000),
 		running:   true,
@@ -81,11 +83,11 @@ type myEventHandler struct {
 func (h *myEventHandler) OnRotate(e *replication.RotateEvent) {
 	pos := e.Position
 	h.mgr.position.Update(string(e.NextLogName), uint32(pos))
-	slog.Info("Binlog 文件切换", "file", string(e.NextLogName), "pos", pos)
+	h.mgr.log.Info("Binlog 文件切换: file=%s pos=%d", string(e.NextLogName), pos)
 }
 
 func (h *myEventHandler) OnDDL(nextPos mysql.Position, e *replication.QueryEvent) error {
-	slog.Debug("DDL 事件", "query", string(e.Query))
+	h.mgr.log.Debug("DDL 事件: %s", string(e.Query))
 	return nil
 }
 
@@ -218,18 +220,14 @@ func (m *IncrementalSyncManager) Run() error {
 			pos := c.SyncedPosition()
 			m.position.Update(pos.Name, uint32(pos.Pos))
 			if err := m.position.Save(); err != nil {
-				slog.Error("保存位点失败", "error", err)
+				m.log.Error("保存位点失败: %v", err)
 			}
 		}
 	}()
 
-	slog.Info("开始监听 Binlog...",
-		"host", m.cfg.Source.Host,
-		"port", m.cfg.Source.PortOrDefault(),
-		"server_id", m.cfg.Sync.ServerIDOrDefault(),
-		"log_file", logFile,
-		"log_pos", logPos,
-	)
+	m.log.Info("开始监听 Binlog... host=%s port=%d server_id=%d log_file=%s log_pos=%d",
+		m.cfg.Source.Host, m.cfg.Source.PortOrDefault(),
+		m.cfg.Sync.ServerIDOrDefault(), logFile, logPos)
 
 	// 从指定位点开始同步
 	var startErr error
@@ -265,9 +263,9 @@ func (m *IncrementalSyncManager) consumer(ctx context.Context) {
 			return
 		}
 		if err := m.writer.ApplyBatch(batch); err != nil {
-			slog.Error("批量写入失败", "count", len(batch), "error", err)
+			m.log.Error("批量写入失败: count=%d error=%v", len(batch), err)
 		} else {
-			slog.Debug("已提交事件", "count", len(batch))
+			m.log.Debug("已提交事件: count=%d", len(batch))
 		}
 		batch = batch[:0]
 		timer.Reset(batchTimeout)
@@ -278,7 +276,7 @@ func (m *IncrementalSyncManager) consumer(ctx context.Context) {
 		case <-ctx.Done():
 			// 刷新剩余数据
 			flush()
-			slog.Info("消费者退出")
+			m.log.Info("消费者退出")
 			return
 
 		case evt := <-m.eventChan:
