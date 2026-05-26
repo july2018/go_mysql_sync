@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,22 +14,25 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"go_mysql_sync/config"
+	"go_mysql_sync/logger"
 )
 
 // FullSyncManager 全量同步管理器
 type FullSyncManager struct {
 	cfg           *config.Config
+	log           *logger.Logger
 	mysqldumpBin  string
 	mysqlBin      string
 	positionFile  string
 }
 
 // New 创建全量同步管理器
-func New(cfg *config.Config) *FullSyncManager {
-	dumpBin := findBin(cfg.Sync.FullSync.MysqldumpBin, "mysqldump")
-	mysqlBin := findBin(cfg.Sync.FullSync.MysqlBin, "mysql")
+func New(cfg *config.Config, log *logger.Logger) *FullSyncManager {
+	dumpBin := findBin(cfg.Sync.FullSync.MysqldumpBin, "mysqldump", log)
+	mysqlBin := findBin(cfg.Sync.FullSync.MysqlBin, "mysql", log)
 	return &FullSyncManager{
 		cfg:          cfg,
+		log:          log,
 		mysqldumpBin: dumpBin,
 		mysqlBin:     mysqlBin,
 		positionFile: cfg.Sync.PositionFileOrDefault(),
@@ -38,7 +40,7 @@ func New(cfg *config.Config) *FullSyncManager {
 }
 
 // findBin 查找可执行文件路径
-func findBin(configuredPath, name string) string {
+func findBin(configuredPath, name string, log *logger.Logger) string {
 	if configuredPath != "" {
 		if _, err := os.Stat(configuredPath); err == nil {
 			return configuredPath
@@ -77,7 +79,7 @@ func findBin(configuredPath, name string) string {
 		}
 	}
 
-	log.Fatalf("找不到 %s，请在配置文件 full_sync.%s_bin 中指定路径", name, name)
+	log.Fatal("找不到 %s，请在配置文件 full_sync.%s_bin 中指定路径", name, name)
 	return ""
 }
 
@@ -197,7 +199,7 @@ func (m *FullSyncManager) ensureDatabaseExists(dbName string) error {
 
 // dumpAndRestore 对单个数据库执行 mysqldump + mysql 导入
 func (m *FullSyncManager) dumpAndRestore(dbName string) error {
-	logger := slog.With("database", dbName)
+	logger := m.log.With("database", dbName)
 	logger.Info("开始全量导出...")
 
 	// 构建 mysqldump 命令
@@ -287,18 +289,18 @@ func (m *FullSyncManager) Run() error {
 		return err
 	}
 	if len(databases) == 0 {
-		slog.Warn("没有找到需要同步的数据库，全量同步跳过")
+		m.log.Warn("没有找到需要同步的数据库，全量同步跳过")
 		return nil
 	}
 
-	slog.Info("需要同步的数据库", "databases", databases)
+	m.log.Info("需要同步的数据库: %v", databases)
 
 	// 记录 Binlog 位点
 	logFile, logPos, err := m.getBinlogPosition()
 	if err != nil {
 		return err
 	}
-	slog.Info("当前 Binlog 位点", "file", logFile, "pos", logPos)
+	m.log.Info("当前 Binlog 位点: file=%s pos=%d", logFile, logPos)
 
 	startTime := time.Now()
 	parallel := m.cfg.Sync.ParallelOrDefault()
@@ -322,7 +324,7 @@ func (m *FullSyncManager) Run() error {
 				mu.Lock()
 				failCount++
 				mu.Unlock()
-				slog.Error("全量同步失败", "database", dbName, "error", err)
+				m.log.Error("全量同步失败 [%s]: %v", dbName, err)
 			} else {
 				mu.Lock()
 				successCount++
@@ -334,11 +336,8 @@ func (m *FullSyncManager) Run() error {
 	wg.Wait()
 
 	elapsed := time.Since(startTime)
-	slog.Info("全量同步完成",
-		"success", successCount,
-		"failed", failCount,
-		"elapsed", elapsed.Round(time.Second).String(),
-	)
+	m.log.Info("全量同步完成: success=%d failed=%d elapsed=%s",
+		successCount, failCount, elapsed.Round(time.Second).String())
 
 	if failCount > 0 {
 		return fmt.Errorf("有 %d 个数据库全量同步失败，请检查日志", failCount)
@@ -348,7 +347,7 @@ func (m *FullSyncManager) Run() error {
 	if err := m.savePosition(logFile, logPos); err != nil {
 		return fmt.Errorf("保存位点文件失败: %w", err)
 	}
-	slog.Info("Binlog 位点已保存", "file", logFile, "pos", logPos, "path", m.positionFile)
+	m.log.Info("Binlog 位点已保存: file=%s pos=%d path=%s", logFile, logPos, m.positionFile)
 
 	return nil
 }
