@@ -3,13 +3,13 @@ package incremental
 import (
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
 
 	"go_mysql_sync/config"
+	"go_mysql_sync/logger"
 )
 
 // DMLEvent 表示一条 DML 事件
@@ -24,13 +24,14 @@ type DMLEvent struct {
 // TargetWriter 目标库批量写入器
 type TargetWriter struct {
 	cfg     *config.Config
+	log     *logger.Logger
 	db      *sql.DB
 	pkCache map[string][]string // "schema.table" -> [pk_col1, pk_col2]
 	mu      sync.RWMutex
 }
 
 // NewTargetWriter 创建目标库写入器
-func NewTargetWriter(cfg *config.Config) (*TargetWriter, error) {
+func NewTargetWriter(cfg *config.Config, log *logger.Logger) (*TargetWriter, error) {
 	db, err := sql.Open("mysql", cfg.Target.DSN())
 	if err != nil {
 		return nil, err
@@ -40,14 +41,14 @@ func NewTargetWriter(cfg *config.Config) (*TargetWriter, error) {
 		db.Close()
 		return nil, err
 	}
-	slog.Info("目标库连接建立", "host", cfg.Target.Host, "port", cfg.Target.PortOrDefault())
-	return &TargetWriter{cfg: cfg, db: db, pkCache: make(map[string][]string)}, nil
+	log.Info("目标库连接建立: %s:%d", cfg.Target.Host, cfg.Target.PortOrDefault())
+	return &TargetWriter{cfg: cfg, log: log, db: db, pkCache: make(map[string][]string)}, nil
 }
 
 // ensureConnected 确保数据库连接可用
 func (w *TargetWriter) ensureConnected() error {
 	if err := w.db.Ping(); err != nil {
-		slog.Warn("目标库连接断开，尝试重连...")
+		w.log.Warn("目标库连接断开，尝试重连...")
 		if err := w.db.Close(); err != nil {
 			// ignore close error
 		}
@@ -59,7 +60,7 @@ func (w *TargetWriter) ensureConnected() error {
 			return fmt.Errorf("重连后 ping 失败: %w", err)
 		}
 		w.db = db
-		slog.Info("目标库重连成功")
+		w.log.Info("目标库重连成功")
 	}
 	return nil
 }
