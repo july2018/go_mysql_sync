@@ -3,24 +3,27 @@ package incremental
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"go_mysql_sync/logger"
 )
 
 // BinlogPosition Binlog 位点管理器（持久化到文件）
 type BinlogPosition struct {
 	mu           sync.Mutex
+	log          *logger.Logger
 	positionFile string
 	LogFile      string
 	LogPos       uint32
 }
 
 // NewBinlogPosition 创建位点管理器
-func NewBinlogPosition(positionFile string) *BinlogPosition {
+func NewBinlogPosition(positionFile string, log *logger.Logger) *BinlogPosition {
 	bp := &BinlogPosition{
+		log:          log,
 		positionFile: positionFile,
 	}
 	bp.load()
@@ -46,17 +49,14 @@ func (bp *BinlogPosition) load() {
 
 	var pos PositionData
 	if err := json.Unmarshal(data, &pos); err != nil {
-		slog.Warn("加载位点文件失败，将从头读取", "error", err)
+		bp.log.Warn("加载位点文件失败，将从头读取: %v", err)
 		return
 	}
 
 	bp.LogFile = pos.LogFile
 	bp.LogPos = pos.LogPos
-	slog.Info("已加载 Binlog 位点",
-		"file", bp.LogFile,
-		"pos", bp.LogPos,
-		"recorded_at", pos.Timestamp,
-	)
+	bp.log.Info("已加载 Binlog 位点: file=%s pos=%d recorded_at=%s",
+		bp.LogFile, bp.LogPos, pos.Timestamp)
 }
 
 // Get 获取当前位点
@@ -122,9 +122,9 @@ func (bp *BinlogPosition) Reset() {
 
 	if _, err := os.Stat(bp.positionFile); err == nil {
 		if err := os.Remove(bp.positionFile); err != nil {
-			slog.Warn("删除位点文件失败", "error", err)
+			bp.log.Warn("删除位点文件失败: %v", err)
 		} else {
-			slog.Warn("已删除 Binlog 位点文件", "path", bp.positionFile)
+			bp.log.Warn("已删除 Binlog 位点文件: %s", bp.positionFile)
 		}
 	}
 }
