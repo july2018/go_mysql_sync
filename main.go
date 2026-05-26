@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,9 +12,12 @@ import (
 	"go_mysql_sync/config"
 	"go_mysql_sync/fullsync"
 	"go_mysql_sync/incremental"
+	"go_mysql_sync/logger"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+var log *logger.Logger
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
@@ -36,14 +39,14 @@ func main() {
 	}
 
 	// 初始化日志
-	logger := setupLogging(cfg)
+	log = setupLogging(cfg)
 
-	logger.Info("============================================================")
-	logger.Info("MySQL 同步程序启动 (Go版)")
-	logger.Info("运行模式", "mode", *mode)
-	logger.Info("源库", "host", cfg.Source.Host, "port", cfg.Source.PortOrDefault())
-	logger.Info("目标库", "host", cfg.Target.Host, "port", cfg.Target.PortOrDefault())
-	logger.Info("============================================================")
+	log.Info("============================================================")
+	log.Info("MySQL 同步程序启动 (Go版)")
+	log.Info("运行模式: %s", *mode)
+	log.Info("源库: %s:%d", cfg.Source.Host, cfg.Source.PortOrDefault())
+	log.Info("目标库: %s:%d", cfg.Target.Host, cfg.Target.PortOrDefault())
+	log.Info("============================================================")
 
 	// 信号处理
 	sigCh := make(chan os.Signal, 1)
@@ -51,50 +54,50 @@ func main() {
 
 	go func() {
 		<-sigCh
-		logger.Info("收到中断信号，程序退出")
+		log.Info("收到中断信号，程序退出")
 		os.Exit(0)
 	}()
 
 	// 执行同步
-	var fullErr, incErr error
+	var fullErr error
 
 	if *mode == "full" || *mode == "all" {
 		if cfg.Sync.FullSync.Enabled {
-			logger.Info("开始全量同步...")
-			mgr := fullsync.New(cfg)
+			log.Info("开始全量同步...")
+			mgr := fullsync.New(cfg, log)
 			fullErr = mgr.Run()
 			if fullErr != nil {
-				logger.Error("全量同步失败", "error", fullErr)
+				log.Error("全量同步失败: %v", fullErr)
 			} else {
-				logger.Info("全量同步完成")
+				log.Info("全量同步完成")
 			}
 		} else {
-			logger.Info("全量同步已禁用，跳过")
+			log.Info("全量同步已禁用，跳过")
 		}
 	}
 
 	if (*mode == "incremental" || *mode == "all") && fullErr == nil {
 		if cfg.Sync.Incremental.Enabled {
-			logger.Info("开始增量同步（监听 Binlog）...")
-			mgr, err := incremental.NewIncrementalSyncManager(cfg)
+			log.Info("开始增量同步（监听 Binlog）...")
+			mgr, err := incremental.NewIncrementalSyncManager(cfg, log)
 			if err != nil {
-				logger.Error("创建增量同步管理器失败", "error", err)
+				log.Error("创建增量同步管理器失败: %v", err)
 				os.Exit(1)
 			}
 			defer mgr.Close()
 
 			if *resetPosition {
-				logger.Warn("--reset-position 已指定，将重置 Binlog 位点")
+				log.Warn("--reset-position 已指定，将重置 Binlog 位点")
 				mgr.ResetPosition()
 			}
 
-			incErr = mgr.Run()
+			incErr := mgr.Run()
 			if incErr != nil {
-				logger.Error("增量同步失败", "error", incErr)
+				log.Error("增量同步失败: %v", incErr)
 				os.Exit(1)
 			}
 		} else {
-			logger.Info("增量同步已禁用，跳过")
+			log.Info("增量同步已禁用，跳过")
 		}
 	}
 
@@ -104,16 +107,8 @@ func main() {
 }
 
 // setupLogging 初始化日志（同时输出到控制台和文件）
-func setupLogging(cfg *config.Config) *slog.Logger {
-	level := slog.LevelInfo
-	switch cfg.Logging.Level {
-	case "DEBUG":
-		level = slog.LevelDebug
-	case "WARNING":
-		level = slog.LevelWarn
-	case "ERROR":
-		level = slog.LevelError
-	}
+func setupLogging(cfg *config.Config) *logger.Logger {
+	level := logger.ParseLevel(cfg.Logging.Level)
 
 	// 确保日志目录存在
 	logDir := "logs"
@@ -137,11 +132,9 @@ func setupLogging(cfg *config.Config) *slog.Logger {
 	// 多输出：文件 + 控制台
 	multiWriter := io.MultiWriter(os.Stdout, fileWriter)
 
-	handler := slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
-		Level: level,
-	})
+	// 使用标准库 log 作为底层
+	baseLogger := log.New(multiWriter, "", log.Ldate|log.Ltime)
+	_ = baseLogger // logger 包自己处理格式
 
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-	return logger
+	return logger.New(multiWriter, level)
 }
